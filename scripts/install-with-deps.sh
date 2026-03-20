@@ -212,6 +212,112 @@ echo -e "${BOLD}Detecting hardware...${NC}"
 detect_hardware
 echo ""
 
+# ─── Global Variables ─────────────────────────────────────────────
+BREW_CMD=""
+
+# ─── Install‑time Verification Helper ───────────────────────────────
+# Once an item is installed, verify it actually worked.
+verify_installed() {
+  local name="$1"
+  local cmd="$2"
+  
+  if command -v "$cmd" &>/dev/null; then
+    local version=""
+    case $cmd in
+      node)  version=" ($(node --version 2>/dev/null || echo 'unknown'))" ;;
+      npm)   version=" ($(npm --version 2>/dev/null | head -1 || echo 'unknown'))" ;;
+      git)   version=" ($(git --version 2>/dev/null | awk '{print $3}' || echo 'unknown'))" ;;
+      brew)  version=" ($(brew --version 2>/dev/null | head -1 | awk '{print $2}' || echo 'unknown'))" ;;
+      openclaw) version=" ($(openclaw --version 2>/dev/null | head -1 || echo 'unknown'))" ;;
+    esac
+    log_ok "${name}${version}"
+    return 0
+  else
+    log_err "${name} (install failed)"
+    return 1
+  fi
+}
+
+# ─── Admin Pre‑Check (macOS) ───────────────────────────────────────
+# Detect non‑admin accounts and warn, but continue with nvm fallback.
+is_macos_admin() {
+  [[ "$OS" != "Darwin" ]] && return 0
+  # Check admin group (handles localized "administradores" etc.)
+  if id -Gn 2>/dev/null | grep -qiE '\b(admin|administradores|administrator)\b'; then
+    return 0
+  fi
+  # Check for password‑less sudo access
+  sudo -n true 2>/dev/null && return 0
+  return 1
+}
+
+# ─── Commit PATH changes permanently ───────────────────────────────
+persist_brew_path() {
+  [[ "$OS" != "Darwin" || -z "$BREW_CMD" ]] && return 0
+  
+  # Find shell profile file
+  local profile_file="$HOME/.zprofile"
+  [[ "${SHELL##*/}" == "bash" ]] && profile_file="$HOME/.bash_profile"
+  [[ ! -f "$profile_file" ]] && profile_file="$HOME/.profile"
+  
+  # Append brew shellenv if not already present
+  local brew_env_line="eval \"\$($BREW_CMD shellenv)\""
+  if ! grep -Fxq "$brew_env_line" "$profile_file" 2>/dev/null; then
+    echo "" >> "$profile_file"
+    echo "$brew_env_line" >> "$profile_file"
+    log_ok "Homebrew PATH persisted to $profile_file"
+    log "  Restart Terminal or run: source $profile_file"
+  fi
+}
+
+# ─── Reload PATH for current session ───────────────────────────────
+reload_brew_path() {
+  if [[ -n "$BREW_CMD" ]] && [[ -f "$BREW_CMD" ]]; then
+    eval "$("$BREW_CMD" shellenv)" 2>/dev/null
+    hash -r
+  fi
+}
+
+# ─── Fallback: nvm for Node.js (no admin required) ───────────────────
+use_nvm_for_node() {
+  [[ "$OS" != "Darwin" ]] && return 1
+  
+  log "Homebrew unavailable → falling back to nvm (no admin required)..."
+  
+  # Install nvm if not present
+  if [[ ! -s "$HOME/.nvm/nvm.sh" ]]; then
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash 2>&1 | tail -5
+  fi
+  
+  # Load nvm
+  export NVM_DIR="$HOME/.nvm"
+  [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+  
+  # Install latest LTS (future‑proof)
+  log "Installing Node.js via nvm..."
+  nvm install --lts && nvm use --lts
+  
+  # Refresh PATH for current script session
+  export PATH="$NVM_DIR/versions/node/$(nvm current)/bin:$PATH"
+  hash -r
+  
+  if command -v node &>/dev/null && command -v npm &>/dev/null; then
+    log_ok "Node.js & npm installed via nvm"
+    return 0
+  else
+    log_err "nvm failed to install Node.js"
+    return 1
+  fi
+}
+
+# ─── macOS Admin Check (soft warning + nvm fallback) ────────────────
+if [[ "$OS" == "Darwin" ]] && ! is_macos_admin; then
+  log_warn "User '$USER' does not have administrator rights"
+  log "  Homebrew requires admin rights → will use nvm fallback for Node.js"
+  log "  (Optional) System Settings → Users & Groups → Allow user to administer this computer"
+  echo ""
+fi
+
 # ─── Dependency Checking ──────────────────────────────────────────
 
 check_dep() {
@@ -266,11 +372,27 @@ install_dep() {
   case "$name" in
     Homebrew)
       NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/null
-      # Add to PATH for current session
+      
+      # Detect where brew was installed
       if [[ -f "/opt/homebrew/bin/brew" ]]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
+        BREW_CMD="/opt/homebrew/bin/brew"
       elif [[ -f "/usr/local/bin/brew" ]]; then
-        eval "$(/usr/local/bin/brew shellenv)"
+        BREW_CMD="/usr/local/bin/brew"
+      else
+        log_err "Homebrew install failed"
+        log "  Manual install: https://brew.sh"
+        return 1
+      fi
+      
+      # Immediately reload PATH for current session
+      reload_brew_path
+      
+      # Verify and persist
+      if verify_installed "Homebrew" "$BREW_CMD"; then
+        persist_brew_path
+        return 0
+      else
+        return 1
       fi
       ;;
 
@@ -282,11 +404,17 @@ install_dep() {
         pacman) sudo pacman -S --noconfirm curl ;;
         *)      log_warn "Cannot auto-install curl on this system"; return 1 ;;
       esac
+      verify_installed "curl" "curl"
       ;;
 
     git)
       if [[ "$OS" == "Darwin" ]]; then
-        brew install git
+        if [[ -n "$BREW_CMD" ]]; then
+          "$BREW_CMD" install git 2>&1 | tail -3
+        else
+          log_err "Homebrew not available — cannot install git"
+          return 1
+        fi
       else
         case "$PACKAGE_MANAGER" in
           apt)    sudo apt-get update -qq && sudo apt-get install -y -qq git ;;
@@ -296,12 +424,25 @@ install_dep() {
           *)      log_warn "Cannot auto-install git on this system"; return 1 ;;
         esac
       fi
+      verify_installed "git" "git"
       ;;
 
-    "Node.js"|npm)
+    "Node.js")
       if [[ "$OS" == "Darwin" ]]; then
-        brew install node
+        if [[ -n "$BREW_CMD" ]] && is_macos_admin; then
+          # Try Homebrew (admin available)
+          "$BREW_CMD" install node 2>&1 | tail -3
+          sleep 1
+          reload_brew_path
+          if ! verify_installed "Node.js" "node" 2>/dev/null; then
+            use_nvm_for_node || return 1
+          fi
+        else
+          # Non‑admin or Homebrew failed — use nvm
+          use_nvm_for_node || return 1
+        fi
       else
+        # Linux
         case "$PACKAGE_MANAGER" in
           apt)
             curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
@@ -312,11 +453,33 @@ install_dep() {
           pacman) sudo pacman -S --noconfirm nodejs npm ;;
           *)      log_warn "Cannot auto-install Node.js on this system"; return 1 ;;
         esac
+        verify_installed "Node.js" "node"
+      fi
+      ;;
+
+    npm)
+      # npm comes with Node.js — just verify
+      if ! verify_installed "npm" "npm" 2>/dev/null; then
+        # On Linux, npm might need separate install
+        case "$PACKAGE_MANAGER" in
+          apt)    sudo apt-get install -y -qq npm ;;
+          dnf)    sudo dnf install -y -q npm ;;
+          yum)    sudo yum install -y -q npm ;;
+          pacman) sudo pacman -S --noconfirm npm ;;
+          *)      log_warn "Cannot auto-install npm on this system"; return 1 ;;
+        esac
+        verify_installed "npm" "npm"
       fi
       ;;
 
     OpenClaw)
-      npm install -g openclaw@latest
+      if command -v npm &>/dev/null; then
+        npm install -g openclaw@latest 2>&1 | tail -3
+        verify_installed "OpenClaw" "openclaw"
+      else
+        log_err "npm not found — cannot install OpenClaw"
+        return 1
+      fi
       ;;
 
     *)
@@ -324,8 +487,6 @@ install_dep() {
       return 1
       ;;
   esac
-
-  log_ok "${name} installed"
 }
 
 if [[ $MISSING_COUNT -gt 0 ]]; then

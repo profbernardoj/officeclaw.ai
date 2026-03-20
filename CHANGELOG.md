@@ -4,6 +4,16 @@ All notable changes to EverClaw are documented here.
 
 ## [2026.3.30] - 2026-03-19
 
+### Fixed
+- **Installer false-positive dependency reporting on macOS** — Non-admin accounts (family, corporate, school Macs) saw misleading `✓ installed` messages when Homebrew failed silently due to missing sudo access. Fix includes:
+  - Early admin pre-check with soft warning + automatic nvm fallback for Node.js (100% Mac compatibility)
+  - Real verification after each install (`verify_installed()` helper) instead of unconditional `log_ok`
+  - Immediate PATH reload for current script session (`reload_brew_path()` + `hash -r`)
+  - Permanent PATH persistence to `~/.zprofile` / `~/.bash_profile` via `persist_brew_path()`
+  - Robust Intel Mac support (`/usr/local/bin/brew`) alongside Apple Silicon (`/opt/homebrew/bin/brew`)
+  - Localized admin group detection (`admin|administradores|administrator`)
+  - nvm fallback with `--lts` for future-proof Node.js installs
+
 ### Added
 - **API key injection via environment variables** — Container entrypoint now accepts `MORPHEUS_GATEWAY_API_KEY` and `MORPHEUS_PROXY_API_KEY` env vars and injects them into the OpenClaw config at startup. `mor-gateway` is a custom provider not in OpenClaw's auto-detection list, so env vars weren't picked up. Users get a clear warning with signup URL if no AI provider keys are configured.
 - **Template placeholder substitution** — Boot templates (IDENTITY.md, USER.md, SOUL.md, TOOLS.md) now have `__PLACEHOLDER__` tokens replaced with actual values during first-run scaffold. Supports env vars: `EVERCLAW_AGENT_NAME` (default: EverClaw), `EVERCLAW_USER_NAME` (default: User), `EVERCLAW_USER_DISPLAY_NAME`, `TZ` (default: UTC), `EVERCLAW_DEFAULT_MODEL` (default: glm-5). Previously, placeholders like `__AGENT_NAME__` were copied verbatim.
